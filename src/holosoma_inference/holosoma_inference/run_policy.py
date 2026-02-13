@@ -17,7 +17,7 @@ import tyro
 from loguru import logger
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
-from holosoma_inference.config.config_values.inference import AnnotatedInferenceConfig
+from holosoma_inference.config.config_values.inference import get_annotated_inference_config
 from holosoma_inference.config.utils import TYRO_CONFIG
 from holosoma_inference.policies.locomotion import LocomotionPolicy
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
@@ -120,7 +120,8 @@ def run_policy(config: InferenceConfig):
 def main(annotated_config=None):
     """Main entry point. Extensions can pass their own AnnotatedInferenceConfig."""
     if annotated_config is None:
-        annotated_config = AnnotatedInferenceConfig
+        # Use factory function to lazily load extension configs
+        annotated_config = get_annotated_inference_config()
     config = tyro.cli(annotated_config, config=TYRO_CONFIG)
     run_policy(config)
 
