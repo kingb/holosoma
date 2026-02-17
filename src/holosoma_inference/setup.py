@@ -48,6 +48,7 @@ setup(
         "wandb",
         "zmq",
         "defusedxml",
+        "evdev",
     ],
     extras_require={
         "dev": [

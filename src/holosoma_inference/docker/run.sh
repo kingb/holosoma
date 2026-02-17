@@ -31,7 +31,7 @@ create_container() {
         -v $HOME/.Xauthority:/root/.Xauthority:ro
         -v /dev/shm:/dev/shm
         -v /dev/input:/dev/input
-+       -v "$HOLOSOMA_DEPS_DIR/bash_history":/root/.bash_history
+        -v "$HOLOSOMA_DEPS_DIR/bash_history":/root/.bash_history
     )
     [[ -d "$EXT_DIR" ]] && mounts+=(-v "$EXT_DIR":/workspace/holosoma-extension) # optionally mount extension repo
 
