@@ -84,19 +84,22 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   else
     pip install -e $ROOT_DIR/src/holosoma_inference[unitree,booster]
   fi
-  # Setup a few things for ARM64 Linux (G1 Jetson)
-  # Otherwise we get this error:
-  # /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_vector.h:1130: ...
+
+   # Setup the power mode on Jetson. Otherwise we get this error:
+  # Setup for ARM64 Linux (Jetson power mode). Without this, onnxruntime will crash with
+  # /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_vector.h:1130: std::vector<_Tp, _Alloc>::reference std::vector<_Tp, _Alloc>::operator[](size_type) [with _Tp = unsigned int; _Alloc = std::allocator<unsigned int>; reference = unsigned int&; size_type = long unsigned int]: Assertion '__n < this->size()' failed.
   if [[ $OS == "Linux" && $ARCH == "aarch64" ]]; then
     sudo nvpmodel -m 0 2>/dev/null || true
-    pip install pin>=3.8.0
-  else
-    if [[ ! -d $WORKSPACE_DIR/unitree_sdk2_python ]]; then
-      git clone https://github.com/unitreerobotics/unitree_sdk2_python.git $WORKSPACE_DIR/unitree_sdk2_python
-    fi
-    pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
-    $CONDA_ROOT/bin/conda install pinocchio -y -c conda-forge --override-channels
   fi
+
+  # Install unitree_sdk2py
+  if [[ ! -d $WORKSPACE_DIR/unitree_sdk2_python ]]; then
+    git clone https://github.com/unitreerobotics/unitree_sdk2_python.git $WORKSPACE_DIR/unitree_sdk2_python
+  fi
+  pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
+
+  # Install pinocchio via conda (not pip) - pip's 'pin' package has native library dependency issues
+  $CONDA_ROOT/bin/mamba install -y -n hsinference pinocchio -c conda-forge --override-channels
 
   cd $ROOT_DIR
   touch $SENTINEL_FILE

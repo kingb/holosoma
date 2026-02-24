@@ -12,6 +12,7 @@ PLATFORM_MAP = {
     "aarch64": "linux_aarch64",
 }
 
+
 platform_tag = PLATFORM_MAP.get(platform.machine(), "linux_x86_64")
 
 unitree_extras = []
@@ -48,6 +49,8 @@ setup(
         "wandb",
         "zmq",
         "defusedxml",
+        # Note: pinocchio must be installed via conda (not pip) due to native library dependencies.
+        # See setup_inference.sh for the conda install command.
     ],
     extras_require={
         "dev": [

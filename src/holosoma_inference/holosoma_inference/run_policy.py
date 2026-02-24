@@ -10,12 +10,14 @@ Usage:
     python run_policy.py inference:g1-29dof-loco --task.model-path https://wandb-url/files/model.onnx
 """
 
+# Enforce site-packages (conda/pip) being resolved before ROS2 python packages
 import sys
 import traceback
 
 import tyro
 from loguru import logger
 
+import holosoma_inference.utils._ros_compat  # noqa: F401
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_values.inference import AnnotatedInferenceConfig
 from holosoma_inference.config.utils import TYRO_CONFIG
