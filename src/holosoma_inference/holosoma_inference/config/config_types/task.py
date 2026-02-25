@@ -27,8 +27,8 @@ class TaskConfig:
     domain_id: int = 0
     """DDS domain ID for communication."""
 
-    interface: str = "lo"
-    """Network interface name."""
+    interface: str = "auto"
+    """Network interface name. Use ``"auto"`` to auto-detect, or specify explicitly (e.g. ``"eth0"``)."""
 
     use_joystick: bool = False
     """Enable joystick control input."""
