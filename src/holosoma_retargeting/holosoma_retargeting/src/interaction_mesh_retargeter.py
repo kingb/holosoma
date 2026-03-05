@@ -4,7 +4,6 @@ import sys
 import time
 from pathlib import Path
 from types import ModuleType
-from typing import Mapping, Sequence
 
 import cvxpy as cp  # type: ignore[import-not-found]
 import mujoco  # type: ignore[import-not-found]
@@ -16,6 +15,8 @@ from scipy import sparse as sp  # type: ignore[import-untyped]
 from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 from tqdm import tqdm
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]
+
+from holosoma_retargeting.config_types.retargeter import FootLockConfig
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
@@ -54,10 +55,7 @@ class InteractionMeshRetargeter:
         collision_detection_threshold: float = 0.1,
         penetration_tolerance: float = 1e-3,
         foot_sticking_tolerance: float = 1e-3,
-        activate_foot_lock_windows: bool = False,
-        foot_lock_windows: Mapping[str, Sequence[tuple[int, int]]] | None = None,
-        z_floor: float = 0.0,
-        z_tol: float = 5e-3,
+        foot_lock: FootLockConfig | None = None,
         visualize: bool = False,
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
@@ -81,10 +79,7 @@ class InteractionMeshRetargeter:
             when the distance is smaller than this threshold.
             penetration_tolerance: tolerance for penetration when enforcing non-penetration constraints.
             foot_sticking_tolerance: tolerance for foot sticking constraints in x, y.
-            activate_foot_lock_windows: whether to enable explicit frame-window foot locking.
-            foot_lock_windows: per-foot inclusive frame windows, e.g. {"L_Toe": [(20, 50)], "R_Toe": [(80, 120)]}.
-            z_floor: floor z height used by the foot-window Z pinning constraints.
-            z_tol: tolerance around z_floor for foot-window Z pinning constraints.
+            foot_lock: configuration for explicit frame-range based foot locking constraints.
             nominal_tracking_tau: the time constant for the nominal tracking cost.
         """
 
@@ -111,30 +106,7 @@ class InteractionMeshRetargeter:
         self.smooth_weight = 0.2
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
-        self.activate_foot_lock_windows = activate_foot_lock_windows
-        self.z_floor = z_floor
-        self.z_tol = z_tol
-        self.foot_lock_windows: dict[str, tuple[tuple[int, int], ...]] = {"left": (), "right": ()}
-        if foot_lock_windows is not None:
-            for key, windows in foot_lock_windows.items():
-                key_lower = key.lower()
-                side = None
-                if key_lower.startswith("l") or ("left" in key_lower):
-                    side = "left"
-                elif key_lower.startswith("r") or ("right" in key_lower):
-                    side = "right"
-                if side is None:
-                    continue
-
-                normalized_windows: list[tuple[int, int]] = []
-                for window in windows:
-                    if len(window) != 2:
-                        raise ValueError(f"Invalid foot lock window for {key}: {window}")
-                    start, end = int(window[0]), int(window[1])
-                    if end < start:
-                        raise ValueError(f"Invalid foot lock window with end < start for {key}: {window}")
-                    normalized_windows.append((start, end))
-                self.foot_lock_windows[side] = tuple(normalized_windows)
+        self._init_foot_lock(foot_lock)
 
         # Setup visualization if requested
         if self.visualize:
@@ -197,6 +169,32 @@ class InteractionMeshRetargeter:
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
+
+    def _init_foot_lock(self, foot_lock: FootLockConfig | None) -> None:
+        """Initialize foot lock configuration and normalize window mappings."""
+        self.foot_lock = foot_lock or FootLockConfig()
+        self._foot_lock_windows: dict[str, tuple[tuple[int, int], ...]] = {"left": (), "right": ()}
+        if self.foot_lock.windows is None:
+            return
+        for key, windows in self.foot_lock.windows.items():
+            key_lower = key.lower()
+            side = None
+            if key_lower.startswith("l") or ("left" in key_lower):
+                side = "left"
+            elif key_lower.startswith("r") or ("right" in key_lower):
+                side = "right"
+            if side is None:
+                continue
+
+            normalized_windows: list[tuple[int, int]] = []
+            for window in windows:
+                if len(window) != 2:
+                    raise ValueError(f"Invalid foot lock window for {key}: {window}")
+                start, end = int(window[0]), int(window[1])
+                if end < start:
+                    raise ValueError(f"Invalid foot lock window with end < start for {key}: {window}")
+                normalized_windows.append((start, end))
+            self._foot_lock_windows[side] = tuple(normalized_windows)
 
     def _setup_visualization(self):
         """Setup Viser visualization components."""
@@ -583,48 +581,52 @@ class InteractionMeshRetargeter:
         # Linear equality
         constraints += [cp.Constant(J_L[:, self.q_a_indices]) @ dqa - lap_var == -lap0_vec]
 
-        # Foot sticking
-        if (self.q_a_init_idx < 12) and self.activate_foot_sticking:
+        # Foot constraints (sticking + foot lock window Z pinning)
+        apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
+        apply_foot_lock = (self.q_a_init_idx < 12) and self.foot_lock.enable and (frame_idx is not None)
+        if apply_foot_sticking or apply_foot_lock:
             J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
-            _, p_WF_t_last_dict, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
-            # Identify 'left' and 'right' flags from provided keys
-            left_key = right_key = None
-            for key in foot_sticking:
-                if key.lower().startswith("l"):
-                    left_key = key
-                elif key.lower().startswith("r"):
-                    right_key = key
-            if left_key is None or right_key is None:
-                raise ValueError("foot_sticking must include one left* and one right* key")
 
-            for key, J_WF in J_WF_dict.items():
-                apply_left = ("left" in key) and foot_sticking[left_key]
-                apply_right = ("right" in key) and foot_sticking[right_key]
-                if apply_left or apply_right:
-                    p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
-                    p_ub = p_lb + 2 * self.foot_sticking_tolerance  # symmetric window
+            # Foot sticking: constrain XY to stay near previous frame position
+            if apply_foot_sticking:
+                _, p_WF_t_last_dict, _ = self._calc_manipulator_jacobians(
+                    q_t_last, links=self.foot_links, obj_frame=False
+                )
+                left_key = right_key = None
+                for key in foot_sticking:
+                    if key.lower().startswith("l"):
+                        left_key = key
+                    elif key.lower().startswith("r"):
+                        right_key = key
+                if left_key is None or right_key is None:
+                    raise ValueError("foot_sticking must include one left* and one right* key")
 
-                    Jxy = J_WF[:2, self.q_a_indices]  # (2 x nq_act)
+                for key, J_WF in J_WF_dict.items():
+                    apply_left = ("left" in key) and foot_sticking[left_key]
+                    apply_right = ("right" in key) and foot_sticking[right_key]
+                    if apply_left or apply_right:
+                        p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
+                        p_ub = p_lb + 2 * self.foot_sticking_tolerance  # symmetric window
+
+                        Jxy = J_WF[:2, self.q_a_indices]  # (2 x nq_act)
+                        constraints += [
+                            Jxy @ dqa >= p_lb[:2],
+                            Jxy @ dqa <= p_ub[:2],
+                        ]
+
+            # Foot lock windows: pin Z to floor within configured frame ranges
+            if apply_foot_lock:
+                for key, J_WF in J_WF_dict.items():
+                    if not self._is_foot_locked_in_window(key, frame_idx):
+                        continue
+
+                    z_anchor = self.foot_lock.z_floor
+                    z_delta = z_anchor - p_WF_dict[key][2]
+                    Jz = J_WF[2, self.q_a_indices]
                     constraints += [
-                        Jxy @ dqa >= p_lb[:2],
-                        Jxy @ dqa <= p_ub[:2],
+                        Jz @ dqa >= z_delta - self.foot_lock.tolerance,
+                        Jz @ dqa <= z_delta + self.foot_lock.tolerance,
                     ]
-
-        # Explicit foot lock windows with Z floor pinning.
-        # This is intentionally separate from foot_sticking logic for debugging.
-        if (self.q_a_init_idx < 12) and self.activate_foot_lock_windows and (frame_idx is not None):
-            J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
-            for key, J_WF in J_WF_dict.items():
-                if not self._is_foot_locked_in_window(key, frame_idx):
-                    continue
-
-                z_anchor = self.z_floor
-                z_delta = z_anchor - p_WF_dict[key][2]
-                Jz = J_WF[2, self.q_a_indices]
-                constraints += [
-                    Jz @ dqa >= z_delta - self.z_tol,
-                    Jz @ dqa <= z_delta + self.z_tol,
-                ]
 
         # Non-penetration constraints
         Js, phis = self._update_jacobians_and_phis_from_q(q)
@@ -705,7 +707,7 @@ class InteractionMeshRetargeter:
         if side is None:
             return False
 
-        return any(start <= frame_idx <= end for start, end in self.foot_lock_windows.get(side, ()))
+        return any(start <= frame_idx <= end for start, end in self._foot_lock_windows.get(side, ()))
 
     def iterate(
         self,
