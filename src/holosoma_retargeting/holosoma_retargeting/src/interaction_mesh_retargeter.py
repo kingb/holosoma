@@ -519,7 +519,7 @@ class InteractionMeshRetargeter:
         q_a_nominal: np.ndarray | None = None,
         verbose=False,
         init_t=False,
-        frame_idx: int | None = None,
+        frame_idx: int = 0,
     ):
         """The main function to solve a single iteration of the DiffIK problem.
         Args:
@@ -583,7 +583,7 @@ class InteractionMeshRetargeter:
 
         # Foot constraints (sticking + foot lock window Z pinning)
         apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
-        apply_foot_lock = (self.q_a_init_idx < 12) and self.foot_lock.enable and (frame_idx is not None)
+        apply_foot_lock = (self.q_a_init_idx < 12) and self.foot_lock.enable
         if apply_foot_sticking or apply_foot_lock:
             J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
 
@@ -722,7 +722,7 @@ class InteractionMeshRetargeter:
         q_a_nominal: np.ndarray | None = None,
         init_t: bool = False,
         n_iter: int = 10,
-        frame_idx: int | None = None,
+        frame_idx: int = 0,
     ):
         """Iterate the solver for multiple iterations."""
         last_cost = np.inf
