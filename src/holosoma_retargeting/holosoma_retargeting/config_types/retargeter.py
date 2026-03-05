@@ -32,6 +32,19 @@ class RetargeterConfig:
     foot_sticking_tolerance: float = 1e-3
     """Tolerance for foot sticking constraints in x, y."""
 
+    activate_foot_lock_windows: bool = False
+    """Whether to enforce explicit frame-range based foot locking constraints."""
+
+    foot_lock_windows: dict[str, list[tuple[int, int]]] | None = None
+    """Per-foot inclusive frame windows for locking.
+    Example: {"L_Toe": [(30, 60)], "R_Toe": [(10, 20), (80, 95)]}"""
+
+    z_floor: float = 0.0
+    """Floor height used by Z pinning constraints."""
+
+    z_tol: float = 5e-3
+    """Tolerance for Z floor pinning constraints."""
+
     step_size: float = 0.2
     """Trust region for each SQP iteration."""
 
