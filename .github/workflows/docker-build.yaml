@@ -1,0 +1,61 @@
+name: Docker Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      push_to_ecr:
+        description: 'Push image to ECR'
+        required: true
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'scripts/setup_*.sh'
+
+permissions:
+  contents: read
+
+env:
+  ECR_REPO: 982423663241.dkr.ecr.us-west-2.amazonaws.com
+  IMAGE_NAME: holosoma
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: codebuild-holosoma-cpu-build-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Generate image tag
+        id: tag
+        run: echo "tag=$(date -u +%Y_%m%d_%H%M)" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        run: |
+          DOCKER_BUILDKIT=1 docker buildx build \
+            -t ${{ env.ECR_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }} \
+            -t ${{ env.ECR_REPO }}/${{ env.IMAGE_NAME }}:latest \
+            -f docker/Dockerfile .
+
+      - name: Push to ECR
+        if: inputs.push_to_ecr != 'false'
+        run: |
+          docker push ${{ env.ECR_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          docker push ${{ env.ECR_REPO }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Summary
+        run: |
+          echo "## Docker Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`${{ steps.tag.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image:** \`${{ env.ECR_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ inputs.push_to_ecr }}" != "false" ]]; then
+            echo "- **Pushed to ECR:** Yes" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Pushed to ECR:** No (build only)" >> "$GITHUB_STEP_SUMMARY"
+          fi
