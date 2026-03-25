@@ -19,6 +19,7 @@ from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
+from holosoma_inference.config.config_types.task import InputSource
 from holosoma_inference.sdk import create_interface
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
@@ -138,11 +139,15 @@ class BasePolicy:
         if hasattr(self, "_shared_hardware_source"):
             self.interface = self._shared_hardware_source.interface
             return
+        # Derive use_joystick for SDK: True if joystick is used for either channel
+        vel = self.config.task.velocity_input
+        other = self.config.task.other_input
+        need_joystick = InputSource.joystick in (vel, other)
         self.interface = create_interface(
             self.robot_config,
             self.config.task.domain_id,
             self.config.task.interface,
-            self.config.task.use_joystick,
+            need_joystick,
         )
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
@@ -300,6 +305,7 @@ class BasePolicy:
             self.rate = self._shared_hardware_source.rate
             self.rl_rate = self._shared_hardware_source.rl_rate
             self.use_joystick = self._shared_hardware_source.use_joystick
+            self.use_keyboard = self._shared_hardware_source.use_keyboard
             return
         self._init_rate_handler()
         self._init_input_device()
@@ -321,17 +327,40 @@ class BasePolicy:
             self.rate = RateLimiter(self.rl_rate)
 
     def _init_input_device(self):
-        """Initialize input device (joystick or keyboard)."""
-        if self.config.task.use_joystick:
+        """Initialize input devices based on velocity_input and other_input config.
+
+        Each channel independently selects from InputSource enum values.
+        Devices are initialized based on the union of both channels' requirements.
+        """
+        vel = self.config.task.velocity_input
+        other = self.config.task.other_input
+        sources = {vel, other}
+
+        # ROS2 subscribers (velocity and/or command topics)
+        if InputSource.ros2 in sources:
+            self._init_ros_node()
+        if vel == InputSource.ros2:
+            self._init_ros_velocity_subscriber()
+        if other == InputSource.ros2:
+            self._init_ros_other_input_subscriber()
+
+        # Joystick (needed if either channel uses it)
+        if InputSource.joystick in sources:
             self._init_joystick_handler()
         else:
+            self.use_joystick = False
+
+        # Keyboard (needed if either channel uses it, or as fallback from joystick on macOS)
+        if InputSource.keyboard in sources:
             self._init_keyboard_handler()
+        else:
+            self.use_keyboard = False
 
     def _init_joystick_handler(self):
         """Initialize joystick handler."""
         if sys.platform == "darwin":
             self.logger.warning("Joystick is not supported on Windows or Mac.")
-            self.logger.warning("Using keyboard instead")
+            self.logger.warning("Falling back to keyboard for joystick channel")
             self.use_joystick = False
             self._init_keyboard_handler()
         else:
@@ -339,19 +368,82 @@ class BasePolicy:
             self.use_joystick = True
 
     def _init_keyboard_handler(self):
-        """Initialize keyboard handler."""
+        """Initialize keyboard handler (starts listener thread once)."""
+        if hasattr(self, "_keyboard_initialized"):
+            return  # Already started
+        self._keyboard_initialized = True
+        self.use_keyboard = True
         self.logger.info("Using keyboard")
-        self.use_joystick = False
-        # Check if running in a TTY environment
         if not sys.stdin.isatty():
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
             self.logger.info("Auto-starting policy in non-interactive mode")
+            self.use_keyboard = False
             self.use_policy_action = True
             return
-        # Start keyboard listener in a daemon thread
         threading.Thread(target=self.start_key_listener, daemon=True).start()
         self.logger.info("Keyboard Listener Initialized")
+
+    def _init_ros_node(self):
+        """Ensure rclpy is initialized and we have a ROS2 node."""
+        if hasattr(self, "node") and self.node is not None:
+            return  # Already initialized (e.g. by use_ros rate handler)
+        import rclpy
+
+        try:
+            rclpy.init(args=None)
+        except RuntimeError:
+            pass  # Already initialized
+        self.node = rclpy.create_node("policy_node")
+        self.logger = self.node.get_logger()
+        self.rate = self.node.create_rate(self.rl_rate)
+        thread = threading.Thread(target=rclpy.spin, args=(self.node,), daemon=True)
+        thread.start()
+
+    def _init_ros_velocity_subscriber(self):
+        """Subscribe to ROS2 velocity topic (TwistStamped on cmd_vel)."""
+        from geometry_msgs.msg import TwistStamped
+
+        vel_topic = self.config.task.ros_cmd_vel_topic
+        self.node.create_subscription(TwistStamped, vel_topic, self._ros_cmd_vel_callback, 10)
+        self.logger.info(f"Subscribed to ROS2 velocity topic: {vel_topic}")
+
+    def _init_ros_other_input_subscriber(self):
+        """Subscribe to ROS2 other_input topic (String on holosoma/other_input)."""
+        from std_msgs.msg import String
+
+        topic = self.config.task.ros_other_input_topic
+        self.node.create_subscription(String, topic, self._ros_other_input_callback, 10)
+        self.logger.info(f"Subscribed to ROS2 other_input topic: {topic}")
+
+    def _ros_cmd_vel_callback(self, msg):
+        """Write velocity commands from ROS2. Clamps to training range."""
+        self.lin_vel_command[0, 0] = max(-1.0, min(1.0, msg.twist.linear.x))
+        self.lin_vel_command[0, 1] = max(-1.0, min(1.0, msg.twist.linear.y))
+        self.ang_vel_command[0, 0] = max(-1.0, min(1.0, msg.twist.angular.z))
+
+    def _ros_other_input_callback(self, msg):
+        """Handle discrete commands from ROS2 other_input topic.
+
+        Equivalent of keyboard/joystick buttons. Accepts string commands:
+        walk, stand, start, stop, init.
+        """
+        cmd = msg.data.strip().lower()
+        if cmd == "walk":
+            self.stand_command[0, 0] = 1
+            self.base_height_command[0, 0] = self.desired_base_height
+            self.logger.info("ROS2 command: walk")
+        elif cmd == "stand":
+            self.stand_command[0, 0] = 0
+            self.logger.info("ROS2 command: stand")
+        elif cmd == "start":
+            self._handle_start_policy()
+        elif cmd == "stop":
+            self._handle_stop_policy()
+        elif cmd == "init":
+            self._handle_init_state()
+        else:
+            self.logger.warning(f"ROS2 command: unknown command '{cmd}'")
 
     # ============================================================================
     # Policy Methods
