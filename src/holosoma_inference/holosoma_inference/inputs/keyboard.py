@@ -1,13 +1,79 @@
-"""Keyboard input providers."""
+"""Keyboard input providers and shared listener."""
 
 from __future__ import annotations
 
+import sys
+import threading
 from typing import TYPE_CHECKING
 
 from holosoma_inference.inputs.base import OtherInput, VelocityInput
 
 if TYPE_CHECKING:
     from holosoma_inference.policies.base import BasePolicy
+
+
+class KeyboardListener:
+    """Shared sshkeyboard listener thread.
+
+    Created lazily by keyboard providers and stored on the policy as
+    ``_keyboard_listener``.  Multiple providers share one instance;
+    ``start()`` is idempotent.  Keypresses are dispatched through
+    ``policy.handle_keyboard_button()`` so DualMode monkey-patching
+    still works.
+    """
+
+    def __init__(self, policy: BasePolicy) -> None:
+        self._policy = policy
+        self._started = False
+
+    def start(self) -> None:
+        """Start the listener thread (idempotent, skipped for shared-hardware secondaries)."""
+        if self._started:
+            return
+        self._started = True
+
+        if not sys.stdin.isatty():
+            self._policy.logger.warning("Not running in a TTY environment - keyboard input disabled")
+            self._policy.logger.warning("This is normal for automated tests or non-interactive environments")
+            self._policy.logger.info("Auto-starting policy in non-interactive mode")
+            self._policy.use_keyboard = False
+            self._policy.use_policy_action = True
+            return
+
+        self._policy.use_keyboard = True
+        self._policy.logger.info("Using keyboard")
+        threading.Thread(target=self._listen, daemon=True).start()
+        self._policy.logger.info("Keyboard Listener Initialized")
+
+    def _listen(self) -> None:
+        from sshkeyboard import listen_keyboard
+
+        def on_press(keycode):
+            try:
+                self._policy.handle_keyboard_button(keycode)
+            except AttributeError:
+                pass
+
+        try:
+            listener = listen_keyboard(on_press=on_press)
+            listener.start()
+            listener.join()
+        except OSError as e:
+            self._policy.logger.warning("Could not start keyboard listener: %s", e)
+            self._policy.logger.warning("Keyboard input will not be available")
+
+
+def _ensure_keyboard_listener(policy: BasePolicy) -> None:
+    """Ensure the shared KeyboardListener exists and is started on *policy*.
+
+    Skipped when the policy is a shared-hardware secondary (the primary
+    policy's listener thread already dispatches to both).
+    """
+    if hasattr(policy, "_shared_hardware_source"):
+        return
+    if not hasattr(policy, "_keyboard_listener"):
+        policy._keyboard_listener = KeyboardListener(policy)
+    policy._keyboard_listener.start()
 
 
 class KeyboardVelocityInput(VelocityInput):
@@ -17,7 +83,7 @@ class KeyboardVelocityInput(VelocityInput):
     """
 
     def start(self) -> None:
-        pass  # Keyboard listener managed by policy
+        _ensure_keyboard_listener(self.policy)
 
 
 class KeyboardOtherInput(OtherInput):
@@ -27,7 +93,7 @@ class KeyboardOtherInput(OtherInput):
     """
 
     def start(self) -> None:
-        pass  # Keyboard listener managed by policy
+        _ensure_keyboard_listener(self.policy)
 
     def handle_key(self, keycode: str) -> bool:
         if self.policy._try_switch_policy_key(keycode):

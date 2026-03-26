@@ -54,6 +54,78 @@ def policy():
 # ============================================================================
 
 
+class TestKeyboardListener:
+    def test_start_is_idempotent(self, policy):
+        from holosoma_inference.inputs.keyboard import KeyboardListener
+
+        # Remove _shared_hardware_source so listener doesn't skip
+        del policy._shared_hardware_source
+        listener = KeyboardListener(policy)
+        listener.start()
+        listener.start()  # second call should be a no-op
+        assert listener._started is True
+
+    def test_skips_thread_in_non_tty(self, policy, monkeypatch):
+        from holosoma_inference.inputs.keyboard import KeyboardListener
+
+        del policy._shared_hardware_source
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        policy.use_keyboard = True
+        policy.use_policy_action = False
+
+        listener = KeyboardListener(policy)
+        listener.start()
+
+        assert policy.use_keyboard is False
+        assert policy.use_policy_action is True
+
+    def test_ensure_skips_shared_hardware(self, policy):
+        from holosoma_inference.inputs.keyboard import _ensure_keyboard_listener
+
+        policy._shared_hardware_source = MagicMock()
+        _ensure_keyboard_listener(policy)
+        assert not hasattr(policy, "_keyboard_listener") or isinstance(
+            policy._keyboard_listener, MagicMock
+        )
+
+    def test_ensure_creates_and_shares_listener(self, monkeypatch):
+        from holosoma_inference.inputs.keyboard import KeyboardListener, _ensure_keyboard_listener
+
+        p = _make_policy()
+        # Remove auto-created attributes from MagicMock
+        del p._shared_hardware_source
+        del p._keyboard_listener
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        _ensure_keyboard_listener(p)
+        assert isinstance(p._keyboard_listener, KeyboardListener)
+
+        # Second call reuses the same listener
+        first = p._keyboard_listener
+        _ensure_keyboard_listener(p)
+        assert p._keyboard_listener is first
+
+    def test_provider_start_calls_ensure(self, monkeypatch):
+        from holosoma_inference.inputs.keyboard import (
+            KeyboardListener,
+            KeyboardOtherInput,
+            KeyboardVelocityInput,
+        )
+
+        p = _make_policy()
+        del p._shared_hardware_source
+        del p._keyboard_listener
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        vel = KeyboardVelocityInput(p)
+        other = KeyboardOtherInput(p)
+        vel.start()
+        other.start()
+
+        assert isinstance(p._keyboard_listener, KeyboardListener)
+        assert p._keyboard_listener._started is True
+
+
 class TestKeyboardVelocityInput:
     def test_base_returns_false_for_all_keys(self, policy):
         from holosoma_inference.inputs.keyboard import KeyboardVelocityInput
@@ -602,6 +674,109 @@ class TestWbtPolicyFactory:
         wp = self._make_wbt()
         assert isinstance(wp._create_velocity_input(InputSource.ros2), Ros2VelocityInput)
         assert isinstance(wp._create_other_input(InputSource.ros2), Ros2OtherInput)
+
+
+# ============================================================================
+# DualMode X/x switching
+# ============================================================================
+
+
+def _try_import_dual_mode():
+    try:
+        from holosoma_inference.policies.dual_mode import DualModePolicy  # noqa: F401
+
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
+_has_dual_mode = _try_import_dual_mode()
+_skip_dual_mode = pytest.mark.skipif(not _has_dual_mode, reason="DualMode deps not installed")
+
+
+def _make_dual():
+    """Build a DualModePolicy with mock policies, skipping __init__."""
+    from holosoma_inference.policies.dual_mode import DualModePolicy
+
+    dual = object.__new__(DualModePolicy)
+    dual.primary = _make_policy()
+    dual.secondary = _make_policy()
+    dual.active = dual.primary
+    dual.active_label = "primary"
+
+    dual.primary._velocity_input = MagicMock()
+    dual.secondary._velocity_input = MagicMock()
+    dual.primary._other_input = MagicMock()
+    dual.secondary._other_input = MagicMock()
+
+    dual._patch_button_handlers()
+    return dual
+
+
+@_skip_dual_mode
+class TestDualModeSwitching:
+    def test_x_keyboard_triggers_switch(self):
+        dual = _make_dual()
+        assert dual.active is dual.primary
+        dual.primary.handle_keyboard_button("x")
+        assert dual.active is dual.secondary
+        assert dual.active_label == "secondary"
+
+    def test_X_joystick_triggers_switch(self):
+        dual = _make_dual()
+        dual.primary.handle_joystick_button("X")
+        assert dual.active is dual.secondary
+
+    def test_double_switch_returns_to_primary(self):
+        dual = _make_dual()
+        dual.primary.handle_keyboard_button("x")
+        dual.secondary.handle_keyboard_button("x")
+        assert dual.active is dual.primary
+        assert dual.active_label == "primary"
+
+    def test_non_switch_keyboard_delegates_to_active(self):
+        dual = _make_dual()
+        orig_primary_kb = dual._orig_kb[id(dual.primary)]
+        dual.primary.handle_keyboard_button("]")
+        orig_primary_kb.assert_called_once_with("]")
+
+    def test_non_switch_joystick_delegates_to_active(self):
+        dual = _make_dual()
+        orig_primary_joy = dual._orig_joy[id(dual.primary)]
+        dual.primary.handle_joystick_button("A")
+        orig_primary_joy.assert_called_once_with("A")
+
+    def test_delegates_to_secondary_after_switch(self):
+        dual = _make_dual()
+        dual.primary.handle_keyboard_button("x")  # switch to secondary
+        orig_secondary_kb = dual._orig_kb[id(dual.secondary)]
+        dual.secondary.handle_keyboard_button("]")
+        orig_secondary_kb.assert_called_once_with("]")
+
+    def test_switch_stops_old_and_starts_new(self):
+        dual = _make_dual()
+        dual.primary.handle_keyboard_button("x")
+        dual.primary._handle_stop_policy.assert_called_once()
+        dual.secondary._resolve_control_gains.assert_called_once()
+        dual.secondary._init_phase_components.assert_called_once()
+        dual.secondary._handle_start_policy.assert_called_once()
+
+    def test_joystick_state_carry_over(self):
+        from holosoma_inference.inputs.joystick import JoystickVelocityInput
+
+        dual = _make_dual()
+        # Replace mock velocity inputs with real JoystickVelocityInput
+        pri_vel = JoystickVelocityInput(dual.primary)
+        pri_vel.key_states = {"X": True, "A": False}
+        sec_vel = JoystickVelocityInput(dual.secondary)
+
+        dual.primary._velocity_input = pri_vel
+        dual.secondary._velocity_input = sec_vel
+
+        dual.primary.handle_keyboard_button("x")
+
+        assert sec_vel.key_states == {"X": True, "A": False}
+        assert sec_vel.last_key_states == {"X": True, "A": False}
 
 
 # ============================================================================

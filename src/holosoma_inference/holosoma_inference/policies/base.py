@@ -14,7 +14,6 @@ import numpy as np
 import onnx
 import onnxruntime
 from loguru import logger
-from sshkeyboard import listen_keyboard
 from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
@@ -344,12 +343,8 @@ class BasePolicy:
         else:
             self.use_joystick = False
 
-        # Keyboard (needed if either channel uses it)
-        if InputSource.keyboard in sources:
-            self._init_keyboard_handler()
-        elif not hasattr(self, "_keyboard_initialized"):
-            # Don't reset if keyboard was already started by joystick macOS fallback
-            self.use_keyboard = False
+        # use_keyboard is set by KeyboardListener when providers start
+        self.use_keyboard = False
 
         self._create_input_providers()
 
@@ -359,27 +354,9 @@ class BasePolicy:
             self.logger.warning("Joystick is not supported on Windows or Mac.")
             self.logger.warning("Falling back to keyboard for joystick channel")
             self.use_joystick = False
-            self._init_keyboard_handler()
         else:
             self.logger.info("Using joystick")
             self.use_joystick = True
-
-    def _init_keyboard_handler(self):
-        """Initialize keyboard handler (starts listener thread once)."""
-        if hasattr(self, "_keyboard_initialized"):
-            return  # Already started
-        self._keyboard_initialized = True
-        self.use_keyboard = True
-        self.logger.info("Using keyboard")
-        if not sys.stdin.isatty():
-            self.logger.warning("Not running in a TTY environment - keyboard input disabled")
-            self.logger.warning("This is normal for automated tests or non-interactive environments")
-            self.logger.info("Auto-starting policy in non-interactive mode")
-            self.use_keyboard = False
-            self.use_policy_action = True
-            return
-        threading.Thread(target=self.start_key_listener, daemon=True).start()
-        self.logger.info("Keyboard Listener Initialized")
 
     def _create_input_providers(self):
         """Create and start input providers based on config.
@@ -801,28 +778,6 @@ class BasePolicy:
         """Update phase time."""
         phase_tp1 = self.phase + self.phase_dt
         self.phase = np.fmod(phase_tp1 + np.pi, 2 * np.pi) - np.pi
-
-    # ============================================================================
-    # Input Handler Methods
-    # ============================================================================
-
-    def start_key_listener(self):
-        """Start keyboard listener thread."""
-
-        def on_press(keycode):
-            try:
-                self.handle_keyboard_button(keycode)
-            except AttributeError:
-                pass  # Handle special keys if needed
-
-        try:
-            listener = listen_keyboard(on_press=on_press)
-            listener.start()
-            listener.join()
-        except OSError as e:
-            # Handle termios errors in non-TTY environments
-            self.logger.warning("Could not start keyboard listener: %s", e)
-            self.logger.warning("Keyboard input will not be available")
 
     # ============================================================================
     # Button Handler Methods (dispatch to providers)
