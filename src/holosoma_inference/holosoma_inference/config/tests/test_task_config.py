@@ -7,8 +7,6 @@ use_keyboard/use_joystick shortcut aliases, and mutual exclusion validation.
 import pytest
 
 from holosoma_inference.config.config_types.task import (
-    DEFAULT_OTHER_INPUT,
-    DEFAULT_VELOCITY_INPUT,
     InputSource,
     TaskConfig,
 )
