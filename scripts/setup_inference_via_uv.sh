@@ -5,8 +5,8 @@ set -e
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
-# Venv configuration
-VENV_DIR=$ROOT_DIR/.venv/hsinference
+# Venv configuration (override via HS_INFER_VENV)
+VENV_DIR="${HS_INFER_VENV:-$ROOT_DIR/.venv/hsinference}"
 
 # Parse command-line arguments
 INSTALL_ROBOT_SDKS=true

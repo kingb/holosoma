@@ -10,7 +10,7 @@ elif [ -n "${ZSH_VERSION}" ]; then
 fi
 
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
-VENV_DIR=$ROOT_DIR/.venv/hsinference
+VENV_DIR="${HS_INFER_VENV:-$ROOT_DIR/.venv/hsinference}"
 
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Error: uv inference environment not found at $VENV_DIR"
